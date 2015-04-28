@@ -32,7 +32,7 @@ import (
 	"syscall"
 
 	"github.com/docker/docker/pkg/mount"
-	"github.com/docker/libcontainer"
+	libcontainerConfigs "github.com/docker/libcontainer/configs"
 	"github.com/golang/glog"
 	"github.com/google/cadvisor/utils/sysfs"
 	"github.com/google/cadvisor/utils/sysinfo"
@@ -115,7 +115,7 @@ func NewFsInfo(context Context) (FsInfo, error) {
 }
 
 // Returns info for all filesystems used by container
-func ContainerFsInfo(context Context, pid int, mountConfig *libcontainer.MountConfig) (FsInfo, error) {
+func ContainerFsInfo(context Context, pid int, mountConfig *libcontainerConfigs.Config) (FsInfo, error) {
 	mounts, err := mount.PidMountInfo(pid)
 	if err != nil {
 		return nil, err
@@ -159,7 +159,13 @@ func ContainerFsInfo(context Context, pid int, mountConfig *libcontainer.MountCo
 		// use corresponding Source mountpoints in Host namespace
 		for _, srcMount := range mountConfig.Mounts {
 			if mount.Mountpoint == srcMount.Destination {
-				partitions[source] = partition{srcMount.Source, uint(mount.Major), uint(mount.Minor)}
+				src := strings.Split(srcMount.Source, "/")
+				source = src[len(src)-1]
+				partitions[source] = partition{
+					mountpoint: srcMount.Source,
+					major:      uint(mount.Major),
+					minor:      uint(mount.Minor),
+				}
 			}
 		}
 	}

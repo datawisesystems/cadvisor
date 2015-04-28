@@ -25,7 +25,6 @@ import (
 	"github.com/docker/libcontainer/cgroups"
 	cgroup_fs "github.com/docker/libcontainer/cgroups/fs"
 	libcontainerConfigs "github.com/docker/libcontainer/configs"
-	"github.com/fsouza/go-dockerclient"
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 	"github.com/google/cadvisor/container"
@@ -130,7 +129,6 @@ func newDockerContainerHandler(
 		cgroupPaths:        cgroupPaths,
 		cgroupManager:      cgroupManager,
 		storageDriver:      storageDriver,
-		fsInfo:             fsInfo,
 		rootFs:             rootFs,
 		storageDirs:        storageDirs,
 		fsHandler:          newFsHandler(time.Minute, storageDirs, fsInfo),
@@ -140,24 +138,6 @@ func newDockerContainerHandler(
 	case aufsStorageDriver:
 		handler.fsHandler.start()
 	}
-
-	// Get the mounted filesystems for the container using /proc/<pid>/mountinfo.
-	state, err := handler.readLibcontainerState()
-	if err == nil {
-		libcontainerConfig, err := handler.readLibcontainerConfig()
-		if err != nil {
-			glog.Errorf("Failed to read Container Config for container %q: %v", id, err)
-		} else {
-			// Get filesystem info based on MountConfig for the container.
-			context := fs.Context{DockerRoot: dockerRootDir}
-			handler.fsInfo, err = fs.ContainerFsInfo(context, state.InitPid, libcontainerConfig.MountConfig)
-			if err != nil {
-				glog.Errorf("Failed to get mounted filesystems for container %q: %v", id, err)
-			}
-		}
-	}
-
-	handler.storageDirs = append(handler.storageDirs, path.Join(*dockerRootDir, pathToAufsDir, id))
 
 	// We assume that if Inspect fails then the container is not known to docker.
 	ctnr, err := client.InspectContainer(id)
@@ -172,6 +152,19 @@ func newDockerContainerHandler(
 	handler.labels = ctnr.Config.Labels
 	handler.image = ctnr.Config.Image
 	handler.networkMode = ctnr.HostConfig.NetworkMode
+
+	// Get the mounted filesystems for the container using /proc/<pid>/mountinfo.
+	libcontainerConfig, err := handler.readLibcontainerConfig()
+	if err != nil {
+		glog.Errorf("Failed to read Container Config for container %q: %v", id, err)
+	} else {
+		// Get filesystem info based on MountConfig for the container.
+		context := fs.Context{DockerRoot: *dockerRootDir}
+		handler.fsInfo, err = fs.ContainerFsInfo(context, handler.pid, libcontainerConfig)
+		if err != nil {
+			glog.Errorf("Failed to get mounted filesystems for container %q: %v", id, err)
+		}
+	}
 
 	return handler, nil
 }
@@ -234,6 +227,9 @@ var (
 )
 
 func hasNet(networkMode string) bool {
+	if strings.Contains(networkMode, "container") {
+		return true
+	}
 	return hasNetworkModes[networkMode]
 }
 
@@ -249,16 +245,8 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 
 	spec := libcontainerConfigToContainerSpec(libcontainerConfig, mi)
 	spec.CreationTime = self.creationTime
-	if self.usesAufsDriver {
-		spec.HasFilesystem = true
-	} else {
-		filesystems, err := self.fsInfo.GetGlobalFsInfo()
-		if err == nil && len(filesystems) > 0 {
-			spec.HasFilesystem = true
-		}
-	}
 	// For now only enable for aufs filesystems
-	spec.HasFilesystem = self.storageDriver == aufsStorageDriver
+	spec.HasFilesystem = (self.storageDriver == aufsStorageDriver || self.storageDriver == devicemapperStorageDriver)
 	spec.Labels = self.labels
 	spec.Image = self.image
 	spec.HasNetwork = hasNet(self.networkMode)
@@ -301,7 +289,7 @@ func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) err
 }
 
 func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
-	if self.usesAufsDriver {
+	if self.storageDriver == aufsStorageDriver {
 		return self.getAufsStats(stats)
 	}
 
