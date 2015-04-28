@@ -37,7 +37,10 @@ import (
 	"unsafe"
 
 	"github.com/docker/docker/pkg/mount"
+	"github.com/docker/libcontainer"
 	"github.com/golang/glog"
+	"github.com/google/cadvisor/utils/sysfs"
+	"github.com/google/cadvisor/utils/sysinfo"
 )
 
 var partitionRegex = regexp.MustCompile("^(:?(:?s|xv)d[a-z]+\\d*|dm-\\d+)$")
@@ -83,6 +86,61 @@ func NewFsInfo(context Context) (FsInfo, error) {
 			continue
 		}
 		partitions[mount.Source] = partition{mount.Mountpoint, uint(mount.Major), uint(mount.Minor)}
+	}
+	glog.Infof("Filesystem partitions: %+v", partitions)
+	fsInfo.partitions = partitions
+	fsInfo.addLabels(context)
+	return fsInfo, nil
+}
+
+// Returns info for all filesystems used by container
+func ContainerFsInfo(context Context, pid int, mountConfig *libcontainer.MountConfig) (FsInfo, error) {
+	mounts, err := mount.PidMountInfo(pid)
+	if err != nil {
+		return nil, err
+	}
+
+	sysFs, err := sysfs.NewRealSysFs()
+	if err != nil {
+		return nil, err
+	}
+
+	diskMap, err := sysinfo.GetBlockDeviceInfo(sysFs)
+	if err != nil {
+		return nil, err
+	}
+
+	partitions := make(map[string]partition, 0)
+	fsInfo := &RealFsInfo{}
+	fsInfo.labels = make(map[string]string, 0)
+	for _, mount := range mounts {
+		// TODO: Need to add xfs
+		if !strings.HasPrefix(mount.Fstype, "ext") && mount.Fstype != "btrfs" {
+			continue
+		}
+
+		// Find block device with matching device major/minor
+		source := ""
+		for _, disk := range diskMap {
+			if mount.Major == int(disk.Major) && mount.Minor == int(disk.Minor) {
+				source = path.Join("/dev", disk.Name)
+				break
+			}
+		}
+		if source == "" {
+			continue
+		}
+		// Avoid bind mounts.
+		if _, ok := partitions[source]; ok {
+			continue
+		}
+		// PidMountInfo returns mountpoints inside the container. Need to
+		// use corresponding Source mountpoints in Host namespace
+		for _, srcMount := range mountConfig.Mounts {
+			if mount.Mountpoint == srcMount.Destination {
+				partitions[source] = partition{srcMount.Source, uint(mount.Major), uint(mount.Minor)}
+			}
+		}
 	}
 	glog.Infof("Filesystem partitions: %+v", partitions)
 	fsInfo.partitions = partitions
