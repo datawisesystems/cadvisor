@@ -29,6 +29,7 @@ import (
 	"github.com/docker/libcontainer/cgroups"
 	cgroup_fs "github.com/docker/libcontainer/cgroups/fs"
 	"github.com/fsouza/go-dockerclient"
+	"github.com/golang/glog"
 	"github.com/google/cadvisor/container"
 	containerLibcontainer "github.com/google/cadvisor/container/libcontainer"
 	"github.com/google/cadvisor/fs"
@@ -109,8 +110,24 @@ func newDockerContainerHandler(
 			Name:   name,
 		},
 		usesAufsDriver: usesAufsDriver,
-		fsInfo:         fsInfo,
 	}
+
+	// Get the mounted filesystems for the container using /proc/<pid>/mountinfo.
+	state, err := handler.readLibcontainerState()
+	if err == nil {
+		libcontainerConfig, err := handler.readLibcontainerConfig()
+		if err != nil {
+			glog.Errorf("Failed to read Container Config for container %q: %v", id, err)
+		} else {
+			// Get filesystem info based on MountConfig for the container.
+			context := fs.Context{DockerRoot: dockerRootDir}
+			handler.fsInfo, err = fs.ContainerFsInfo(context, state.InitPid, libcontainerConfig.MountConfig)
+			if err != nil {
+				glog.Errorf("Failed to get mounted filesystems for container %q: %v", id, err)
+			}
+		}
+	}
+
 	handler.storageDirs = append(handler.storageDirs, path.Join(dockerRootDir, pathToAufsDir, id))
 
 	// We assume that if Inspect fails then the container is not known to docker.
@@ -244,17 +261,17 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 	spec.CreationTime = self.creationTime
 	if self.usesAufsDriver {
 		spec.HasFilesystem = true
+	} else {
+		filesystems, err := self.fsInfo.GetGlobalFsInfo()
+		if err == nil && len(filesystems) > 0 {
+			spec.HasFilesystem = true
+		}
 	}
 
 	return spec, err
 }
 
-func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
-	// No support for non-aufs storage drivers.
-	if !self.usesAufsDriver {
-		return nil
-	}
-
+func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) error {
 	// As of now we assume that all the storage dirs are on the same device.
 	// The first storage dir will be that of the image layers.
 	deviceInfo, err := self.fsInfo.GetDirFsDevice(self.storageDirs[0])
@@ -288,6 +305,38 @@ func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error
 	}
 	fsStat.Usage = usage
 	stats.Filesystem = append(stats.Filesystem, fsStat)
+
+	return nil
+}
+
+func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
+	if self.usesAufsDriver {
+		return self.getAufsStats(stats)
+	}
+
+	filesystems, err := self.fsInfo.GetGlobalFsInfo()
+	if err != nil {
+		return err
+	}
+	for _, fs := range filesystems {
+		stats.Filesystem = append(stats.Filesystem,
+			info.FsStats{
+				Device:          fs.Device,
+				Limit:           fs.Capacity,
+				Usage:           fs.Capacity - fs.Free,
+				ReadsCompleted:  fs.DiskStats.ReadsCompleted,
+				ReadsMerged:     fs.DiskStats.ReadsMerged,
+				SectorsRead:     fs.DiskStats.SectorsRead,
+				ReadTime:        fs.DiskStats.ReadTime,
+				WritesCompleted: fs.DiskStats.WritesCompleted,
+				WritesMerged:    fs.DiskStats.WritesMerged,
+				SectorsWritten:  fs.DiskStats.SectorsWritten,
+				WriteTime:       fs.DiskStats.WriteTime,
+				IoInProgress:    fs.DiskStats.IoInProgress,
+				IoTime:          fs.DiskStats.IoTime,
+				WeightedIoTime:  fs.DiskStats.WeightedIoTime,
+			})
+	}
 
 	return nil
 }
