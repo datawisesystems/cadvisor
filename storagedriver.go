@@ -21,10 +21,13 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/google/cadvisor/cache/memory"
 	"github.com/google/cadvisor/storage"
 	"github.com/google/cadvisor/storage/bigquery"
 	"github.com/google/cadvisor/storage/influxdb"
-	"github.com/google/cadvisor/storage/memory"
+	"github.com/google/cadvisor/storage/redis"
+	"github.com/google/cadvisor/storage/statsd"
+	"github.com/google/cadvisor/storage/stdout"
 )
 
 var argDbUsername = flag.String("storage_driver_user", "root", "database username")
@@ -37,8 +40,8 @@ var argDbBufferDuration = flag.Duration("storage_driver_buffer_duration", 60*tim
 var storageDuration = flag.Duration("storage_duration", 2*time.Minute, "How long to keep data stored (Default: 2min).")
 
 // Creates a memory storage with an optional backend storage option.
-func NewMemoryStorage(backendStorageName string) (*memory.InMemoryStorage, error) {
-	var storageDriver *memory.InMemoryStorage
+func NewMemoryStorage(backendStorageName string) (*memory.InMemoryCache, error) {
+	var storageDriver *memory.InMemoryCache
 	var backendStorage storage.StorageDriver
 	var err error
 	switch backendStorageName {
@@ -71,6 +74,30 @@ func NewMemoryStorage(backendStorageName string) (*memory.InMemoryStorage, error
 			hostname,
 			*argDbTable,
 			*argDbName,
+		)
+	case "redis":
+		//machineName: We use os.Hostname as the machineName (A unique identifier to identify the host that runs the current cAdvisor)
+		//argDbName: the key for redis's data
+		//argDbHost: the redis's server host
+		var machineName string
+		machineName, err = os.Hostname()
+		if err != nil {
+			return nil, err
+		}
+		backendStorage, err = redis.New(
+			machineName,
+			*argDbName,
+			*argDbHost,
+			*argDbBufferDuration,
+		)
+	case "statsd":
+		backendStorage, err = statsd.New(
+			*argDbName,
+			*argDbHost,
+		)
+	case "stdout":
+		backendStorage, err = stdout.New(
+			*argDbHost,
 		)
 	default:
 		err = fmt.Errorf("unknown backend storage driver: %v", *argDbDriver)

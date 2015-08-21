@@ -18,6 +18,12 @@ sudo docker run \
 
 cAdvisor is now running (in the background) on `http://localhost:8080/`. The setup includes directories with Docker state cAdvisor needs to observe.
 
+## Latest Canary
+
+The latest cAdvisor canary release is continuously built from HEAD and available
+as an Automated Build Docker image:
+[google/cadvisor-canary](https://registry.hub.docker.com/u/google/cadvisor-canary/). We do *not* recommend using this image in production due to its large size and volatility.
+
 ## With Boot2Docker
 
 After booting up a boot2docker instance, run cAdvisor image with the same docker command mentioned above. cAdvisor can now be accessed at port 8080 of your boot2docker instance. The host IP can be found through DOCKER_HOST environment variable setup by boot2docker:
@@ -29,11 +35,17 @@ tcp://192.168.59.103:2376
 
 In this case, cAdvisor UI should be accessible on `http://192.168.59.103:8080`
 
-### CentOS and RHEL
+## Other Configurations
 
-On CentOS and RHEL the cgroup hierarchies are mounted in `/cgroup` so run cAdvisor with an additional Docker option of `--volume=/cgroup:/cgroup \`.
+### CentOS, Fedora, and RHEL
 
-## Debian
+You may need to run the container with `--privileged=true` and `--volume=/cgroup:/cgroup:ro \` in order for cAdvisor to monitor Docker containers.
+
+RHEL and CentOS lock down their containers a bit more. cAdvisor needs access to the Docker daemon through its socket. This requires `--privileged=true` in RHEL and CentOS.
+
+On some versions of RHEL and CentOS the cgroup hierarchies are mounted in `/cgroup` so run cAdvisor with an additional Docker option of `--volume=/cgroup:/cgroup:ro \`.
+
+### Debian
 
 By default, Debian disables the memory cgroup which does not allow cAdvisor to gather memory stats. To enable the memory cgroup take a look at [these instructions](https://github.com/google/cadvisor/issues/432).
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/cadvisor/client"
+	"github.com/google/cadvisor/client/v2"
 	"github.com/google/cadvisor/integration/common"
 )
 
@@ -123,12 +124,14 @@ type ShellActions interface {
 type CadvisorActions interface {
 	// Returns a cAdvisor client to the machine being tested.
 	Client() *client.Client
+	ClientV2() *v2.Client
 }
 
 type realFramework struct {
-	hostname       HostnameInfo
-	t              *testing.T
-	cadvisorClient *client.Client
+	hostname         HostnameInfo
+	t                *testing.T
+	cadvisorClient   *client.Client
+	cadvisorClientV2 *v2.Client
 
 	shellActions  shellActions
 	dockerActions dockerActions
@@ -193,6 +196,18 @@ func (self *realFramework) Client() *client.Client {
 		self.cadvisorClient = cadvisorClient
 	}
 	return self.cadvisorClient
+}
+
+// Gets a v2 client to the cAdvisor being tested.
+func (self *realFramework) ClientV2() *v2.Client {
+	if self.cadvisorClientV2 == nil {
+		cadvisorClientV2, err := v2.NewClient(self.Hostname().FullHostname())
+		if err != nil {
+			self.t.Fatalf("Failed to instantiate the cAdvisor client: %v", err)
+		}
+		self.cadvisorClientV2 = cadvisorClientV2
+	}
+	return self.cadvisorClientV2
 }
 
 func (self dockerActions) RunPause() string {
@@ -265,7 +280,7 @@ func (self shellActions) Run(command string, args ...string) (string, string) {
 		cmd = exec.Command(command, args...)
 	} else {
 		// We must SSH to the remote machine and run the command.
-		cmd = exec.Command("gcutil", append([]string{"ssh", self.fm.Hostname().GceInstanceName, command}, args...)...)
+		cmd = exec.Command("gcloud", append([]string{"compute", "ssh", common.GetZoneFlag(), self.fm.Hostname().GceInstanceName, "--", command}, args...)...)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -286,7 +301,7 @@ func (self shellActions) RunStress(command string, args ...string) (string, stri
 		cmd = exec.Command(command, args...)
 	} else {
 		// We must SSH to the remote machine and run the command.
-		cmd = exec.Command("gcutil", append([]string{"ssh", self.fm.Hostname().GceInstanceName, command}, args...)...)
+		cmd = exec.Command("gcloud", append([]string{"compute", "ssh", common.GetZoneFlag(), self.fm.Hostname().GceInstanceName, "--", command}, args...)...)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

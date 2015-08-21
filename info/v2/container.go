@@ -64,11 +64,22 @@ type ContainerSpec struct {
 	// An example of a namespace is "docker" for Docker containers.
 	Namespace string `json:"namespace,omitempty"`
 
+	// Metadata labels associated with this container.
+	Labels map[string]string `json:"labels,omitempty"`
+
 	HasCpu bool    `json:"has_cpu"`
 	Cpu    CpuSpec `json:"cpu,omitempty"`
 
 	HasMemory bool       `json:"has_memory"`
 	Memory    MemorySpec `json:"memory,omitempty"`
+
+	HasCustomMetrics bool            `json:"has_custom_metrics"`
+	CustomMetrics    []v1.MetricSpec `json:"custom_metrics,omitempty"`
+
+	// Following resources have no associated spec, but are being isolated.
+	HasNetwork    bool `json:"has_network"`
+	HasFilesystem bool `json:"has_filesystem"`
+	HasDiskIo     bool `json:"has_diskio"`
 }
 
 type ContainerStats struct {
@@ -84,14 +95,17 @@ type ContainerStats struct {
 	HasMemory bool           `json:"has_memory"`
 	Memory    v1.MemoryStats `json:"memory,omitempty"`
 	// Network statistics
-	HasNetwork bool              `json:"has_network"`
-	Network    []v1.NetworkStats `json:"network,omitempty"`
+	HasNetwork bool         `json:"has_network"`
+	Network    NetworkStats `json:"network,omitempty"`
 	// Filesystem statistics
 	HasFilesystem bool         `json:"has_filesystem"`
 	Filesystem    []v1.FsStats `json:"filesystem,omitempty"`
 	// Task load statistics
 	HasLoad bool         `json:"has_load"`
 	Load    v1.LoadStats `json:"load_stats,omitempty"`
+	// Custom Metrics
+	HasCustomMetrics bool                      `json:"has_custom_metrics"`
+	CustomMetrics    map[string][]v1.MetricVal `json:"custom_metrics,omitempty"`
 }
 
 type Percentiles struct {
@@ -102,8 +116,12 @@ type Percentiles struct {
 	Mean uint64 `json:"mean"`
 	// Max seen over the collected sample.
 	Max uint64 `json:"max"`
+	// 50th percentile over the collected sample.
+	Fifty uint64 `json:"fifty"`
 	// 90th percentile over the collected sample.
 	Ninety uint64 `json:"ninety"`
+	// 95th percentile over the collected sample.
+	NinetyFive uint64 `json:"ninetyfive"`
 }
 
 type Usage struct {
@@ -148,6 +166,9 @@ type FsInfo struct {
 	// Filesystem usage in bytes.
 	Capacity uint64 `json:"capacity"`
 
+	// Bytes available for non-root use.
+	Available uint64 `json:"available"`
+
 	// Number of bytes used on this filesystem.
 	Usage uint64 `json:"usage"`
 
@@ -162,4 +183,24 @@ type RequestOptions struct {
 	Count int `json:"count"`
 	// Whether to include stats for child subcontainers.
 	Recursive bool `json:"recursive"`
+}
+
+type ProcessInfo struct {
+	User          string  `json:"user"`
+	Pid           int     `json:"pid"`
+	Ppid          int     `json:"parent_pid"`
+	StartTime     string  `json:"start_time"`
+	PercentCpu    float32 `json:"percent_cpu"`
+	PercentMemory float32 `json:"percent_mem"`
+	RSS           uint64  `json:"rss"`
+	VirtualSize   uint64  `json:"virtual_size"`
+	Status        string  `json:"status"`
+	RunningTime   string  `json:"running_time"`
+	CgroupPath    string  `json:"cgroup_path"`
+	Cmd           string  `json:"cmd"`
+}
+
+type NetworkStats struct {
+	// Network stats by interface.
+	Interfaces []v1.InterfaceStats `json:"interfaces,omitempty"`
 }

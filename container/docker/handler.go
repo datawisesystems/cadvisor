@@ -69,6 +69,9 @@ type dockerContainerHandler struct {
 
 	// Time at which this container was created.
 	creationTime time.Time
+
+	// Metadata labels associated with the container.
+	labels map[string]string
 }
 
 func newDockerContainerHandler(
@@ -132,6 +135,7 @@ func newDockerContainerHandler(
 	// Add the name and bare ID as aliases of the container.
 	handler.aliases = append(handler.aliases, strings.TrimPrefix(ctnr.Name, "/"))
 	handler.aliases = append(handler.aliases, id)
+	handler.labels = ctnr.Config.Labels
 
 	return handler, nil
 }
@@ -180,7 +184,7 @@ func libcontainerConfigToContainerSpec(config *libcontainerConfigs.Config, mi *i
 	}
 	spec.Cpu.Mask = utils.FixCpuMask(config.Cgroups.CpusetCpus, mi.NumCores)
 
-	spec.HasNetwork = true
+	spec.HasNetwork = len(config.Networks) > 0
 	spec.HasDiskIo = true
 
 	return spec
@@ -206,6 +210,7 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 			spec.HasFilesystem = true
 		}
 	}
+	spec.Labels = self.labels
 
 	return spec, err
 }
@@ -305,17 +310,10 @@ func (self *dockerContainerHandler) GetStats() (*info.ContainerStats, error) {
 	}
 
 	// TODO(rjnagal): Remove the conversion when network stats are read from libcontainer.
-	net := stats.Network
-	// Ingress for host veth is from the container.
-	// Hence tx_bytes stat on the host veth is actually number of bytes received by the container.
-	stats.Network.RxBytes = net.TxBytes
-	stats.Network.RxPackets = net.TxPackets
-	stats.Network.RxErrors = net.TxErrors
-	stats.Network.RxDropped = net.TxDropped
-	stats.Network.TxBytes = net.RxBytes
-	stats.Network.TxPackets = net.RxPackets
-	stats.Network.TxErrors = net.RxErrors
-	stats.Network.TxDropped = net.RxDropped
+	convertInterfaceStats(&stats.Network.InterfaceStats)
+	for i := range stats.Network.Interfaces {
+		convertInterfaceStats(&stats.Network.Interfaces[i])
+	}
 
 	// Get filesystem stats.
 	err = self.getFsStats(stats)
@@ -324,6 +322,21 @@ func (self *dockerContainerHandler) GetStats() (*info.ContainerStats, error) {
 	}
 
 	return stats, nil
+}
+
+func convertInterfaceStats(stats *info.InterfaceStats) {
+	net := *stats
+
+	// Ingress for host veth is from the container.
+	// Hence tx_bytes stat on the host veth is actually number of bytes received by the container.
+	stats.RxBytes = net.TxBytes
+	stats.RxPackets = net.TxPackets
+	stats.RxErrors = net.TxErrors
+	stats.RxDropped = net.TxDropped
+	stats.TxBytes = net.RxBytes
+	stats.TxPackets = net.RxPackets
+	stats.TxErrors = net.RxErrors
+	stats.TxDropped = net.RxDropped
 }
 
 func (self *dockerContainerHandler) ListContainers(listType container.ListType) ([]info.ContainerReference, error) {
@@ -368,9 +381,12 @@ func (self *dockerContainerHandler) ListThreads(listType container.ListType) ([]
 	return nil, nil
 }
 
+func (self *dockerContainerHandler) GetContainerLabels() map[string]string {
+	return self.labels
+}
+
 func (self *dockerContainerHandler) ListProcesses(listType container.ListType) ([]int, error) {
-	// TODO(vmarmol): Implement.
-	return nil, nil
+	return containerLibcontainer.GetProcesses(self.cgroupManager)
 }
 
 func (self *dockerContainerHandler) WatchSubcontainers(events chan container.SubcontainerEvent) error {
@@ -384,4 +400,28 @@ func (self *dockerContainerHandler) StopWatchingSubcontainers() error {
 
 func (self *dockerContainerHandler) Exists() bool {
 	return containerLibcontainer.Exists(*dockerRootDir, *dockerRunDir, self.id)
+}
+
+func DockerInfo() (map[string]string, error) {
+	client, err := docker.NewClient(*ArgDockerEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
+	}
+	info, err := client.Info()
+	if err != nil {
+		return nil, err
+	}
+	return info.Map(), nil
+}
+
+func DockerImages() ([]docker.APIImages, error) {
+	client, err := docker.NewClient(*ArgDockerEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
+	}
+	images, err := client.ListImages(docker.ListImagesOptions{All: false})
+	if err != nil {
+		return nil, err
+	}
+	return images, nil
 }

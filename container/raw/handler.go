@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"code.google.com/p/go.exp/inotify"
 	"github.com/docker/libcontainer/cgroups"
 	cgroup_fs "github.com/docker/libcontainer/cgroups/fs"
 	"github.com/docker/libcontainer/configs"
@@ -34,6 +33,8 @@ import (
 	"github.com/google/cadvisor/fs"
 	info "github.com/google/cadvisor/info/v1"
 	"github.com/google/cadvisor/utils"
+	"github.com/google/cadvisor/utils/machine"
+	"golang.org/x/exp/inotify"
 )
 
 type rawContainerHandler struct {
@@ -43,16 +44,10 @@ type rawContainerHandler struct {
 	machineInfoFactory info.MachineInfoFactory
 
 	// Inotify event watcher.
-	watcher *inotify.Watcher
+	watcher *InotifyWatcher
 
 	// Signal for watcher thread to stop.
 	stopWatcher chan error
-
-	// Containers being watched for new subcontainers.
-	watches map[string]struct{}
-
-	// Cgroup paths being watched for new subcontainers
-	cgroupWatches map[string]struct{}
 
 	// Absolute path to the cgroup hierarchies of this container.
 	// (e.g.: "cpu" -> "/sys/fs/cgroup/cpu/test")
@@ -68,7 +63,7 @@ type rawContainerHandler struct {
 	externalMounts []mount
 }
 
-func newRawContainerHandler(name string, cgroupSubsystems *libcontainer.CgroupSubsystems, machineInfoFactory info.MachineInfoFactory, fsInfo fs.FsInfo) (container.ContainerHandler, error) {
+func newRawContainerHandler(name string, cgroupSubsystems *libcontainer.CgroupSubsystems, machineInfoFactory info.MachineInfoFactory, fsInfo fs.FsInfo, watcher *InotifyWatcher) (container.ContainerHandler, error) {
 	// Create the cgroup paths.
 	cgroupPaths := make(map[string]string, len(cgroupSubsystems.MountPoints))
 	for key, val := range cgroupSubsystems.MountPoints {
@@ -107,13 +102,12 @@ func newRawContainerHandler(name string, cgroupSubsystems *libcontainer.CgroupSu
 		cgroupSubsystems:   cgroupSubsystems,
 		machineInfoFactory: machineInfoFactory,
 		stopWatcher:        make(chan error),
-		watches:            make(map[string]struct{}),
-		cgroupWatches:      make(map[string]struct{}),
 		cgroupPaths:        cgroupPaths,
 		cgroupManager:      cgroupManager,
 		fsInfo:             fsInfo,
 		hasNetwork:         hasNetwork,
 		externalMounts:     externalMounts,
+		watcher:            watcher,
 	}, nil
 }
 
@@ -177,7 +171,11 @@ func (self *rawContainerHandler) GetSpec() (info.ContainerSpec, error) {
 	now := time.Now()
 	lowestTime := now
 	for _, cgroupPath := range self.cgroupPaths {
-		// The modified time of the cgroup directory is when the container was created.
+		// The modified time of the cgroup directory changes whenever a subcontainer is created.
+		// eg. /docker will have creation time matching the creation of latest docker container.
+		// Use clone_children as a workaround as it isn't usually modified. It is only likely changed
+		// immediately after creating a container.
+		cgroupPath = path.Join(cgroupPath, "cgroup.clone_children")
 		fi, err := os.Stat(cgroupPath)
 		if err == nil && fi.ModTime().Before(lowestTime) {
 			lowestTime = fi.ModTime()
@@ -213,13 +211,33 @@ func (self *rawContainerHandler) GetSpec() (info.ContainerSpec, error) {
 		}
 	}
 
-	// Memory.
-	memoryRoot, ok := self.cgroupPaths["memory"]
-	if ok {
-		if utils.FileExists(memoryRoot) {
+	// Memory
+	if self.name == "/" {
+		// Get memory and swap limits of the running machine
+		memLimit, err := machine.GetMachineMemoryCapacity()
+		if err != nil {
+			glog.Warningf("failed to obtain memory limit for machine container")
+			spec.HasMemory = false
+		} else {
+			spec.Memory.Limit = uint64(memLimit)
+			// Spec is marked to have memory only if the memory limit is set
 			spec.HasMemory = true
-			spec.Memory.Limit = readInt64(memoryRoot, "memory.limit_in_bytes")
-			spec.Memory.SwapLimit = readInt64(memoryRoot, "memory.memsw.limit_in_bytes")
+		}
+
+		swapLimit, err := machine.GetMachineSwapCapacity()
+		if err != nil {
+			glog.Warningf("failed to obtain swap limit for machine container")
+		} else {
+			spec.Memory.SwapLimit = uint64(swapLimit)
+		}
+	} else {
+		memoryRoot, ok := self.cgroupPaths["memory"]
+		if ok {
+			if utils.FileExists(memoryRoot) {
+				spec.HasMemory = true
+				spec.Memory.Limit = readInt64(memoryRoot, "memory.limit_in_bytes")
+				spec.Memory.SwapLimit = readInt64(memoryRoot, "memory.memsw.limit_in_bytes")
+			}
 		}
 	}
 
@@ -260,6 +278,7 @@ func (self *rawContainerHandler) getFsStats(stats *info.ContainerStats) error {
 					Device:          fs.Device,
 					Limit:           fs.Capacity,
 					Usage:           fs.Capacity - fs.Free,
+					Available:       fs.Available,
 					ReadsCompleted:  fs.DiskStats.ReadsCompleted,
 					ReadsMerged:     fs.DiskStats.ReadsMerged,
 					SectorsRead:     fs.DiskStats.SectorsRead,
@@ -307,15 +326,13 @@ func (self *rawContainerHandler) getFsStats(stats *info.ContainerStats) error {
 }
 
 func (self *rawContainerHandler) GetStats() (*info.ContainerStats, error) {
-	var networkInterfaces []string
 	nd, err := self.GetRootNetworkDevices()
 	if err != nil {
 		return new(info.ContainerStats), err
 	}
-	if len(nd) != 0 {
-		// ContainerStats only reports stat for one network device.
-		// TODO(rjnagal): Handle multiple physical network devices.
-		networkInterfaces = []string{nd[0].Name}
+	networkInterfaces := make([]string, len(nd))
+	for i := range nd {
+		networkInterfaces[i] = nd[i].Name
 	}
 	stats, err := libcontainer.GetStats(self.cgroupManager, networkInterfaces)
 	if err != nil {
@@ -337,6 +354,10 @@ func (self *rawContainerHandler) GetCgroupPath(resource string) (string, error) 
 		return "", fmt.Errorf("could not find path for resource %q for container %q\n", resource, self.name)
 	}
 	return path, nil
+}
+
+func (self *rawContainerHandler) GetContainerLabels() map[string]string {
+	return map[string]string{}
 }
 
 // Lists all directories under "path" and outputs the results as children of "parent".
@@ -394,33 +415,46 @@ func (self *rawContainerHandler) ListThreads(listType container.ListType) ([]int
 }
 
 func (self *rawContainerHandler) ListProcesses(listType container.ListType) ([]int, error) {
-	// TODO(vmarmol): Implement
-	return nil, nil
+	return libcontainer.GetProcesses(self.cgroupManager)
 }
 
-func (self *rawContainerHandler) watchDirectory(dir string, containerName string) error {
-	err := self.watcher.AddWatch(dir, inotify.IN_CREATE|inotify.IN_DELETE|inotify.IN_MOVE)
+// Watches the specified directory and all subdirectories. Returns whether the path was
+// already being watched and an error (if any).
+func (self *rawContainerHandler) watchDirectory(dir string, containerName string) (bool, error) {
+	alreadyWatching, err := self.watcher.AddWatch(containerName, dir)
 	if err != nil {
-		return err
+		return alreadyWatching, err
 	}
-	self.watches[containerName] = struct{}{}
-	self.cgroupWatches[dir] = struct{}{}
+
+	// Remove the watch if further operations failed.
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_, err := self.watcher.RemoveWatch(containerName, dir)
+			if err != nil {
+				glog.Warningf("Failed to remove inotify watch for %q: %v", dir, err)
+			}
+		}
+	}()
 
 	// TODO(vmarmol): We should re-do this once we're done to ensure directories were not added in the meantime.
 	// Watch subdirectories as well.
 	entries, err := ioutil.ReadDir(dir)
 	if err != nil {
-		return err
+		return alreadyWatching, err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			err = self.watchDirectory(path.Join(dir, entry.Name()), path.Join(containerName, entry.Name()))
+			// TODO(vmarmol): We don't have to fail here, maybe we can recover and try to get as many registrations as we can.
+			_, err = self.watchDirectory(path.Join(dir, entry.Name()), path.Join(containerName, entry.Name()))
 			if err != nil {
-				return err
+				return alreadyWatching, err
 			}
 		}
 	}
-	return nil
+
+	cleanup = false
+	return alreadyWatching, nil
 }
 
 func (self *rawContainerHandler) processEvent(event *inotify.Event, events chan container.SubcontainerEvent) error {
@@ -456,10 +490,8 @@ func (self *rawContainerHandler) processEvent(event *inotify.Event, events chan 
 	// Maintain the watch for the new or deleted container.
 	switch {
 	case eventType == container.SubcontainerAdd:
-		_, alreadyWatched := self.watches[containerName]
-
 		// New container was created, watch it.
-		err := self.watchDirectory(event.Name, containerName)
+		alreadyWatched, err := self.watchDirectory(event.Name, containerName)
 		if err != nil {
 			return err
 		}
@@ -469,20 +501,16 @@ func (self *rawContainerHandler) processEvent(event *inotify.Event, events chan 
 			return nil
 		}
 	case eventType == container.SubcontainerDelete:
-		// Container was deleted, stop watching for it. Only delete the event if we registered it.
-		if _, ok := self.cgroupWatches[event.Name]; ok {
-			err := self.watcher.RemoveWatch(event.Name)
-			if err != nil {
-				return err
-			}
-			delete(self.cgroupWatches, event.Name)
+		// Container was deleted, stop watching for it.
+		lastWatched, err := self.watcher.RemoveWatch(containerName, event.Name)
+		if err != nil {
+			return err
 		}
 
 		// Only report container deletion once.
-		if _, ok := self.watches[containerName]; !ok {
+		if !lastWatched {
 			return nil
 		}
-		delete(self.watches, containerName)
 	default:
 		return fmt.Errorf("unknown event type %v", eventType)
 	}
@@ -497,18 +525,9 @@ func (self *rawContainerHandler) processEvent(event *inotify.Event, events chan 
 }
 
 func (self *rawContainerHandler) WatchSubcontainers(events chan container.SubcontainerEvent) error {
-	// Lazily initialize the watcher so we don't use it when not asked to.
-	if self.watcher == nil {
-		w, err := inotify.NewWatcher()
-		if err != nil {
-			return err
-		}
-		self.watcher = w
-	}
-
 	// Watch this container (all its cgroups) and all subdirectories.
 	for _, cgroupPath := range self.cgroupPaths {
-		err := self.watchDirectory(cgroupPath, self.name)
+		_, err := self.watchDirectory(cgroupPath, self.name)
 		if err != nil {
 			return err
 		}
@@ -518,18 +537,17 @@ func (self *rawContainerHandler) WatchSubcontainers(events chan container.Subcon
 	go func() {
 		for {
 			select {
-			case event := <-self.watcher.Event:
+			case event := <-self.watcher.Event():
 				err := self.processEvent(event, events)
 				if err != nil {
 					glog.Warningf("Error while processing event (%+v): %v", event, err)
 				}
-			case err := <-self.watcher.Error:
+			case err := <-self.watcher.Error():
 				glog.Warningf("Error while watching %q:", self.name, err)
 			case <-self.stopWatcher:
 				err := self.watcher.Close()
 				if err == nil {
 					self.stopWatcher <- err
-					self.watcher = nil
 					return
 				}
 			}
@@ -540,10 +558,6 @@ func (self *rawContainerHandler) WatchSubcontainers(events chan container.Subcon
 }
 
 func (self *rawContainerHandler) StopWatchingSubcontainers() error {
-	if self.watcher == nil {
-		return fmt.Errorf("can't stop watch that has not started for container %q", self.name)
-	}
-
 	// Rendezvous with the watcher thread.
 	self.stopWatcher <- nil
 	return <-self.stopWatcher

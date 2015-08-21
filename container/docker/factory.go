@@ -24,7 +24,6 @@ import (
 	"sync"
 
 	"github.com/docker/libcontainer/cgroups"
-	"github.com/docker/libcontainer/cgroups/systemd"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 	"github.com/google/cadvisor/container"
@@ -55,16 +54,19 @@ var check = sync.Once{}
 
 func UseSystemd() bool {
 	check.Do(func() {
-		// run and initialize useSystemd
-		useSystemd = systemd.UseSystemd()
-		if !useSystemd {
-			// Second attempt at checking for systemd, check for a "name=systemd" cgroup.
-			mnt, err := cgroups.FindCgroupMountpoint("cpu")
+		useSystemd = false
+
+		// Check for system.slice in systemd and cpu cgroup.
+		for _, cgroupType := range []string{"name=systemd", "cpu"} {
+			mnt, err := cgroups.FindCgroupMountpoint(cgroupType)
 			if err == nil {
 				// systemd presence does not mean systemd controls cgroups.
 				// If system.slice cgroup exists, then systemd is taking control.
 				// This breaks if user creates system.slice manually :)
-				useSystemd = utils.FileExists(mnt + "/system.slice")
+				if utils.FileExists(path.Join(mnt, "system.slice")) {
+					useSystemd = true
+					break
+				}
 			}
 		}
 	})
@@ -134,17 +136,23 @@ func FullContainerName(dockerId string) string {
 }
 
 // Docker handles all containers under /docker
-func (self *dockerFactory) CanHandle(name string) (bool, error) {
+func (self *dockerFactory) CanHandleAndAccept(name string) (bool, bool, error) {
+	// docker factory accepts all containers it can handle.
+	canAccept := true
 	// Check if the container is known to docker and it is active.
 	id := ContainerNameToDockerId(name)
 
 	// We assume that if Inspect fails then the container is not known to docker.
 	ctnr, err := self.client.InspectContainer(id)
 	if err != nil || !ctnr.State.Running {
-		return false, fmt.Errorf("error inspecting container: %v", err)
+		return false, canAccept, fmt.Errorf("error inspecting container: %v", err)
 	}
 
-	return true, nil
+	return true, canAccept, nil
+}
+
+func (self *dockerFactory) DebugInfo() map[string][]string {
+	return map[string][]string{}
 }
 
 func parseDockerVersion(full_version_string string) ([]int, error) {
