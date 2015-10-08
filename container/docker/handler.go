@@ -26,6 +26,7 @@ import (
 	cgroup_fs "github.com/docker/libcontainer/cgroups/fs"
 	libcontainerConfigs "github.com/docker/libcontainer/configs"
 	"github.com/fsouza/go-dockerclient"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 	"github.com/google/cadvisor/container"
 	containerLibcontainer "github.com/google/cadvisor/container/libcontainer"
@@ -38,6 +39,21 @@ import (
 // aufs/layers is ignored here since it does not hold a lot of data.
 // aufs/mnt contains the mount points used to compose the rootfs. Hence it is also ignored.
 var pathToAufsDir = "aufs/diff"
+
+type fsHandler struct {
+	lastUpdate time.Time
+	usageBytes uint64
+	frequency  time.Duration
+}
+
+func (fh *fsHandler) needsUpdate() bool {
+	return time.Now().After(fh.lastUpdate.Add(fh.frequency))
+}
+
+func (fh *fsHandler) update(usage uint64) {
+	fh.lastUpdate = time.Now()
+	fh.usageBytes = usage
+}
 
 type dockerContainerHandler struct {
 	client             *docker.Client
@@ -84,6 +100,9 @@ type dockerContainerHandler struct {
 
 	// The network mode of the container
 	networkMode string
+
+	// Filesystem handler.
+	fsHandler fsHandler
 }
 
 func newDockerContainerHandler(
@@ -125,6 +144,7 @@ func newDockerContainerHandler(
 		usesAufsDriver:     usesAufsDriver,
 		fsInfo:             fsInfo,
 		rootFs:             rootFs,
+		fsHandler:          fsHandler{lastUpdate: time.Time{}, usageBytes: 0, frequency: time.Minute},
 	}
 
 	// Get the mounted filesystems for the container using /proc/<pid>/mountinfo.
@@ -273,14 +293,17 @@ func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) err
 
 	fsStat := info.FsStats{Device: deviceInfo.Device, Limit: limit}
 
-	var usage uint64 = 0
-	for _, dir := range self.storageDirs {
-		// TODO(Vishh): Add support for external mounts.
-		dirUsage, err := self.fsInfo.GetDirUsage(dir)
-		if err != nil {
-			return err
+	var usage uint64 = self.fsHandler.usageBytes
+	if self.fsHandler.needsUpdate() {
+		for _, dir := range self.storageDirs {
+			// TODO(Vishh): Add support for external mounts.
+			dirUsage, err := self.fsInfo.GetDirUsage(dir)
+			if err != nil {
+				return err
+			}
+			usage += dirUsage
 		}
-		usage += dirUsage
+		self.fsHandler.update(usage)
 	}
 	fsStat.Usage = usage
 	stats.Filesystem = append(stats.Filesystem, fsStat)
