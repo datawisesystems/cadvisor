@@ -64,9 +64,9 @@ type dockerContainerHandler struct {
 	// Manager of this container's cgroups.
 	cgroupManager cgroups.Manager
 
-	usesAufsDriver bool
-	fsInfo         fs.FsInfo
-	storageDirs    []string
+	storageDriver storageDriver
+	fsInfo        fs.FsInfo
+	storageDirs   []string
 
 	// Time at which this container was created.
 	creationTime time.Time
@@ -95,7 +95,7 @@ func newDockerContainerHandler(
 	name string,
 	machineInfoFactory info.MachineInfoFactory,
 	fsInfo fs.FsInfo,
-	usesAufsDriver bool,
+	storageDriver storageDriver,
 	cgroupSubsystems *containerLibcontainer.CgroupSubsystems,
 	inHostNamespace bool,
 ) (container.ContainerHandler, error) {
@@ -129,14 +129,15 @@ func newDockerContainerHandler(
 		machineInfoFactory: machineInfoFactory,
 		cgroupPaths:        cgroupPaths,
 		cgroupManager:      cgroupManager,
-		usesAufsDriver:     usesAufsDriver,
+		storageDriver:      storageDriver,
 		fsInfo:             fsInfo,
 		rootFs:             rootFs,
 		storageDirs:        storageDirs,
 		fsHandler:          newFsHandler(time.Minute, storageDirs, fsInfo),
 	}
 
-	if usesAufsDriver {
+	switch storageDriver {
+	case aufsStorageDriver:
 		handler.fsHandler.start()
 	}
 
@@ -256,6 +257,8 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 			spec.HasFilesystem = true
 		}
 	}
+	// For now only enable for aufs filesystems
+	spec.HasFilesystem = self.storageDriver == aufsStorageDriver
 	spec.Labels = self.labels
 	spec.Image = self.image
 	spec.HasNetwork = hasNet(self.networkMode)
@@ -264,6 +267,11 @@ func (self *dockerContainerHandler) GetSpec() (info.ContainerSpec, error) {
 }
 
 func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) error {
+	// No support for non-aufs storage drivers.
+	if self.storageDriver != aufsStorageDriver {
+		return nil
+	}
+
 	// As of now we assume that all the storage dirs are on the same device.
 	// The first storage dir will be that of the image layers.
 	deviceInfo, err := self.fsInfo.GetDirFsDevice(self.storageDirs[0])
