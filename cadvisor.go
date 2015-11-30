@@ -54,7 +54,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("cAdvisor version %s\n", version.VERSION)
+		fmt.Printf("cAdvisor version %s (%s)\n", version.Info["version"], version.Info["revision"])
 		os.Exit(0)
 	}
 
@@ -78,10 +78,12 @@ func main() {
 	mux := http.DefaultServeMux
 
 	// Register all HTTP handlers.
-	err = cadvisorHttp.RegisterHandlers(mux, containerManager, *httpAuthFile, *httpAuthRealm, *httpDigestFile, *httpDigestRealm, *prometheusEndpoint)
+	err = cadvisorHttp.RegisterHandlers(mux, containerManager, *httpAuthFile, *httpAuthRealm, *httpDigestFile, *httpDigestRealm)
 	if err != nil {
 		glog.Fatalf("Failed to register HTTP handlers: %v", err)
 	}
+
+	cadvisorHttp.RegisterPrometheusHandler(mux, containerManager, *prometheusEndpoint, nil)
 
 	// Start the manager.
 	if err := containerManager.Start(); err != nil {
@@ -91,7 +93,7 @@ func main() {
 	// Install signal handler.
 	installSignalHandler(containerManager)
 
-	glog.Infof("Starting cAdvisor version: %q on port %d", version.VERSION, *argPort)
+	glog.Infof("Starting cAdvisor version: %s-%s on port %d", version.Info["version"], version.Info["revision"], *argPort)
 
 	addr := fmt.Sprintf("%s:%d", *argIp, *argPort)
 	glog.Fatal(http.ListenAndServe(addr, nil))
