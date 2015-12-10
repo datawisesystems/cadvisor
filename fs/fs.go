@@ -46,11 +46,12 @@ const (
 )
 
 type partition struct {
-	mountpoint string
-	major      uint
-	minor      uint
-	fsType     string
-	blockSize  uint
+	srcMountpoint  string
+	destMountpoint string
+	major          uint
+	minor          uint
+	fsType         string
+	blockSize      uint
 }
 
 type RealFsInfo struct {
@@ -89,9 +90,9 @@ func NewFsInfo(context Context) (FsInfo, error) {
 			continue
 		}
 		partitions[mount.Source] = partition{
-			mountpoint: mount.Mountpoint,
-			major:      uint(mount.Major),
-			minor:      uint(mount.Minor),
+			srcMountpoint: mount.Mountpoint,
+			major:         uint(mount.Major),
+			minor:         uint(mount.Minor),
 		}
 	}
 	if storageDriver, ok := context.DockerInfo["Driver"]; ok && storageDriver == "devicemapper" {
@@ -159,12 +160,11 @@ func ContainerFsInfo(context Context, pid int, mountConfig *libcontainerConfigs.
 		// use corresponding Source mountpoints in Host namespace
 		for _, srcMount := range mountConfig.Mounts {
 			if mount.Mountpoint == srcMount.Destination {
-				src := strings.Split(srcMount.Source, "/")
-				source = src[len(src)-1]
 				partitions[source] = partition{
-					mountpoint: srcMount.Source,
-					major:      uint(mount.Major),
-					minor:      uint(mount.Minor),
+					srcMountpoint:  srcMount.Source,
+					destMountpoint: srcMount.Destination,
+					major:          uint(mount.Major),
+					minor:          uint(mount.Minor),
 				}
 			}
 		}
@@ -178,12 +178,12 @@ func ContainerFsInfo(context Context, pid int, mountConfig *libcontainerConfigs.
 func (self *RealFsInfo) addLabels(context Context) {
 	dockerPaths := getDockerImagePaths(context)
 	for src, p := range self.partitions {
-		if p.mountpoint == "/" {
+		if p.srcMountpoint == "/" {
 			if _, ok := self.labels[LabelSystemRoot]; !ok {
 				self.labels[LabelSystemRoot] = src
 			}
 		}
-		self.updateDockerImagesPath(src, p.mountpoint, dockerPaths)
+		self.updateDockerImagesPath(src, p.srcMountpoint, dockerPaths)
 		// TODO(rjnagal): Add label for docker devicemapper pool.
 	}
 }
@@ -213,7 +213,7 @@ func (self *RealFsInfo) updateDockerImagesPath(source string, mountpoint string,
 		if v == mountpoint {
 			if i, ok := self.labels[LabelDockerImages]; ok {
 				// pick the innermost mountpoint.
-				mnt := self.partitions[i].mountpoint
+				mnt := self.partitions[i].srcMountpoint
 				if len(mnt) < len(mountpoint) {
 					self.labels[LabelDockerImages] = source
 				}
@@ -247,7 +247,7 @@ func (self *RealFsInfo) GetMountpointForDevice(dev string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("no partition info for device %q", dev)
 	}
-	return p.mountpoint, nil
+	return p.srcMountpoint, nil
 }
 
 func (self *RealFsInfo) GetFsInfoForPath(mountSet map[string]struct{}) ([]Fs, error) {
@@ -258,7 +258,7 @@ func (self *RealFsInfo) GetFsInfoForPath(mountSet map[string]struct{}) ([]Fs, er
 		return nil, err
 	}
 	for device, partition := range self.partitions {
-		_, hasMount := mountSet[partition.mountpoint]
+		_, hasMount := mountSet[partition.srcMountpoint]
 		_, hasDevice := deviceSet[device]
 		if mountSet == nil || (hasMount && !hasDevice) {
 			var (
@@ -269,14 +269,14 @@ func (self *RealFsInfo) GetFsInfoForPath(mountSet map[string]struct{}) ([]Fs, er
 			case "devicemapper":
 				total, free, avail, err = getDMStats(device, partition.blockSize)
 			default:
-				total, free, avail, err = getVfsStats(partition.mountpoint)
+				total, free, avail, err = getVfsStats(partition.srcMountpoint)
 			}
 			if err != nil {
 				glog.Errorf("Stat fs failed. Error: %v", err)
 			} else {
 				deviceSet[device] = struct{}{}
 				deviceInfo := DeviceInfo{
-					Device: device,
+					Device: partition.destMountpoint,
 					Major:  uint(partition.major),
 					Minor:  uint(partition.minor),
 				}
