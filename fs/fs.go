@@ -26,7 +26,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -37,8 +36,6 @@ import (
 	"github.com/google/cadvisor/utils/sysfs"
 	"github.com/google/cadvisor/utils/sysinfo"
 )
-
-var partitionRegex = regexp.MustCompile("^(:?(:?s|xv)d[a-z]+\\d*|dm-\\d+)$")
 
 const (
 	LabelSystemRoot   = "root"
@@ -305,9 +302,7 @@ func getDiskStatsMap(diskStatsFile string) (map[string]DiskStats, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		words := strings.Fields(line)
-		if !partitionRegex.MatchString(words[2]) {
-			continue
-		}
+
 		// 8      50 sdd2 40 0 280 223 7 0 22 108 0 330 330
 		deviceName := path.Join("/dev", words[2])
 		wordLength := len(words)
