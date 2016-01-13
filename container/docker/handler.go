@@ -260,6 +260,12 @@ func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) err
 		return nil
 	}
 
+	// fsInfo is not available when process dies while we are collecting the
+	// stats.
+	if self.fsInfo == nil {
+		return nil
+	}
+
 	// As of now we assume that all the storage dirs are on the same device.
 	// The first storage dir will be that of the image layers.
 	deviceInfo, err := self.fsInfo.GetDirFsDevice(self.storageDirs[0])
@@ -291,6 +297,12 @@ func (self *dockerContainerHandler) getAufsStats(stats *info.ContainerStats) err
 func (self *dockerContainerHandler) getFsStats(stats *info.ContainerStats) error {
 	if self.storageDriver == aufsStorageDriver {
 		return self.getAufsStats(stats)
+	}
+
+	// fsInfo is not available when process dies while we are collecting the
+	// stats.
+	if self.fsInfo == nil {
+		return nil
 	}
 
 	filesystems, err := self.fsInfo.GetGlobalFsInfo()
