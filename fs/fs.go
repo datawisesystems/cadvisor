@@ -158,6 +158,11 @@ func ContainerFsInfo(context Context, pid int, mountConfig *libcontainerconfigs.
 		if source == "" {
 			continue
 		}
+
+		if mount.Root != "/" {
+			continue
+		}
+
 		// Avoid bind mounts.
 		if _, ok := fsInfo.partitions[source]; ok {
 			continue
